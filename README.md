@@ -1,174 +1,75 @@
-# LlamaCPU
-An LLM-driven Neuro-Symbolic Processor
+# LlamaCPU: A Neuro-Symbolic Architecture with a Large Language Model as a Differentiable CPU
 
+  <!-- TODO: Replace with an actual architecture diagram URL -->
 
-![alt text](https://img.shields.io/badge/build-passing-brightgreen)
+## Overview
 
+**LlamaCPU** is a novel neuro-symbolic architecture that re-imagines a Large Language Model (LLM) not just as a task-solver, but as the central processing unit (CPU) of a fully differentiable computer. Inspired by the von Neumann architecture, this project separates the system into a neural CPU (Llama 3), a differentiable RAM (a structured external memory), and a neural ALU (an operator execution unit), all trainable end-to-end.
 
-![alt text](https://img.shields.io/badge/License-MIT-yellow.svg)
+The core idea is to teach the LLM to perform complex, multi-step algorithmic tasks by compiling high-level instructions into a low-level program in memory, and then executing it step-by-step.
 
+## Key Features
 
-![alt text](https://img.shields.io/badge/python-3.10+-blue.svg)
+- **LLM as a Differentiable CPU**: Leverages the vast pre-trained knowledge and reasoning capabilities of Llama 3 to control the entire computational process.
+- **Differentiable RAM with Pointers**: Implements a `HybridSWM` (Hybrid Slot-based Working Memory) that acts as a structured, addressable memory. Crucially, it supports pointers, enabling the creation of complex data structures and indirect addressing.
+- **Two-Phase "Plan & Execute" Process**:
+    1.  **Plan (Compile) Phase**: The LLM acts as a "compiler," translating a high-level task (e.g., "calculate 123 + 456") into a sequence of low-level instructions and data representations within the SWM.
+    2.  **Execute Phase**: The LLM switches its role to a "processor," sequentially fetching and executing instructions from memory, guided by a program counter.
+- **End-to-End Differentiability**: Unlike tool-using LLMs that call external, non-differentiable APIs, every component in LlamaCPU is differentiable. Gradients flow through the entire execution trace, allowing the model to learn *how* to perform computations, not just what the final answer is.
+- **Curriculum Learning**: The model learns progressively, starting with simple tasks (e.g., single-digit addition) and gradually moving to more complex ones, ensuring stable and robust learning.
 
-llamaCPU is an experimental neuro-symbolic architecture that re-imagines a Large Language Model (Llama 3) as a general-purpose, differentiable Central Processing Unit (CPU). It learns to execute algorithmic tasks by manipulating a structured, external memory, drawing a direct analogy to the von Neumann architecture.
+## Architecture
 
-The core idea is to move beyond using LLMs as monolithic problem-solvers and instead leverage them as the core component of a learnable, structured reasoning system.
+The LlamaCPU system consists of three main components:
 
-Core Concept
+1.  **Llama 3 Model (`Llama3_NSW_OEU`)**: The core controller.
+    - In the **Plan Phase**, it synthesizes entire memory slots (containing types, pointers, and content) to set up the program and data.
+    - In the **Execute Phase**, it predicts the next instruction to execute based on the current program counter.
 
-The system is designed as a differentiable counterpart to a classic computer:
+2.  **HybridSWM (Differentiable RAM)**: A slot-based memory module.
+    - Each slot is a vector with dedicated parts for a type, multiple pointers, and content.
+    - Pointers are represented as keys that can attend over all memory slot addresses, enabling differentiable read and write operations.
 
-LLM as a Neural CPU: The Large Language Model (in this case, meta-llama/Meta-Llama-3-8B-Instruct) acts as the central controller. It interprets high-level instructions and drives the step-by-step execution of a program.
+3.  **Operator Execution Unit (OEU)**: A small, specialized neural network that acts as a Neural ALU.
+    - It takes an operator slot and its argument slots (read from memory via pointers) as input.
+    - It performs the actual computation (e.g., addition) and produces a result to be written back to memory.
 
-HybridSWM as Differentiable RAM: A HybridSWM (Hybrid Short-term Working Memory) module serves as an external, differentiable memory space. It's not just a key-value store; its slots are structured to hold types, content, and pointers, enabling the creation of complex data structures.
+## Current Status
 
-OEU as a Neural ALU: An OperatorExecutionUnit (OEU) functions as a learnable Arithmetic Logic Unit. Instead of using fixed operations (+, -), it's a neural module that learns to perform computations based on operator and operand embeddings.
+The model is currently being trained on multi-digit addition using a curriculum learning approach. The logs show that the architecture is functioning correctly and the loss is steadily decreasing, demonstrating its ability to learn algorithmic procedures.
 
-Architecture
+## Setup and Usage
 
-The system operates in a two-phase process: PLAN and EXEC.
+1.  **Prerequisites**:
+    - Python 3.10+
+    - PyTorch
+    - Transformers, PEFT, BitsAndBytes, Accelerate
 
-Generated code
-User Prompt ("Calculate 18 + 7")
-           │
-           ▼
-┌──────────────────────┐
-│     LLM (as CPU)     │
-└──────────────────────┘
-           │
-           ├───► Phase 1: PLAN (Compile)
-           │     The LLM acts as a "compiler," translating the user prompt
-           │     into a low-level program and data representation within the SWM.
-           │
-           │          ┌──────────────────────────────────┐
-           │          │      HybridSWM (as RAM)          │
-           │          │ ┌───────┐      ┌───────┐         │
-           │          │ │ Slot  │ ...  │ Slot  │ ...     │
-           │          │ │ type  │      │ type  │         │
-           │          │ │ ptrs  │      │ ptrs  │         │
-           │          │ │ data  │      │ data  │         │
-           │          │ └───────┘      └───────┘         │
-           │          └──────────────────────────────────┘
-           │
-           └───► Phase 2: EXEC (Execute)
-                 The LLM acts as a "processor," sequentially executing
-                 the program stored in the SWM.
+    Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-                 For each step:
-                   1. Read Program Counter (PC) from SWM.
-                   2. Fetch instruction from SWM using PC.
-                   3. Read operands from SWM using pointers in the instruction.
-                   4. Pass operator & operands to OEU (ALU) for computation.
-                   5. Write result back to SWM.
-                   6. Increment PC.
+2.  **Hugging Face Access**:
+    Ensure you are logged into your Hugging Face account and have access to the `meta-llama/Meta-Llama-3-8B-Instruct` model.
+    ```bash
+    huggingface-cli login
+    ```
 
-How It Works
+3.  **Training**:
+    To start or resume training, simply run:
+    ```bash
+    python main.py
+    ```
+    The script will automatically find the latest checkpoint in the `checkpoints_final_adder/` directory and resume training from the last attempted stage. If no checkpoint is found, it will start from Stage 0 (1-digit addition).
 
-PLAN Phase (Compilation): Given a high-level task like "Autonomously calculate 25 + 42", the LLM first populates the HybridSWM. It creates slots for the input numbers (2, 5, 4, 2), the result placeholders, constants (like 10), and the actual program instructions (a sequence of pointers representing ADD, COPY, etc.). This entire memory layout is the "compiled" program.
+## Future Work
 
-EXEC Phase (Execution): The LLM's role shifts. It now focuses solely on driving the execution. In a loop, it:
-a. Predicts the current program counter (PC) address.
-b. Reads the instruction from that address in the HybridSWM.
-c. The instruction contains pointers to its arguments (e.g., a pointer to the digit '5' and a pointer to the 'carry' bit).
-d. These arguments are passed to the OperatorExecutionUnit (OEU), which computes a result.
-e. The result is written back to the memory location specified by the instruction's output pointer.
-f. The PC is incremented, and the loop continues until a HALT instruction is reached.
+- [ ] **Expand Algorithmic Capabilities**: Train the model on more complex algorithms like sorting (e.g., Bubble Sort), searching, and basic string manipulation.
+- [ ] **Enhance the OEU**: Develop more sophisticated OEUs capable of handling a wider range of logical and arithmetic operations.
+- [ ] **Autonomous Memory Management**: Explore methods for the LLM to dynamically allocate and de-allocate memory slots as needed.
+- [ ] **Generalization**: Test the model's ability to generalize to tasks and problem sizes it has not seen during training.
 
-The entire process, from prediction to memory access to computation, is end-to-end differentiable, allowing the system to learn not just what to do, but how to perform the computation itself.
+## License
 
-Key Features
-
-Differentiable von Neumann Architecture: A novel implementation of the classic CPU-RAM model within a neural framework.
-
-Two-Phase Computation: A clean separation between high-level task planning (PLAN) and low-level algorithmic execution (EXEC), which stabilizes learning.
-
-Structured, Differentiable Memory: The HybridSWM supports pointers, allowing for the creation and manipulation of data structures, a critical component for symbolic reasoning.
-
-Learned Neural Operators: The OEU learns to perform semantic operations, moving beyond fixed, hard-coded functions.
-
-Curriculum Learning: The model is trained on a curriculum, starting with single-digit addition and progressively increasing the difficulty. This is essential for mastering complex, multi-step algorithms.
-
-Novelty & Comparison to Existing Work
-
-vs. DNC/NTM: While inspired by differentiable memory, llamaCPU uses a modern, pre-trained LLM as its controller, endowing the system with vast world knowledge and superior instruction-following capabilities from the start.
-
-vs. Tool-formers/ReAct: These models call external, non-differentiable tools (like a calculator API). In llamaCPU, the memory and ALU are internal, differentiable components. The gradient flows through the computation process itself, allowing the model to learn how to calculate, not just when to call a black-box tool.
-
-vs. LLM Code Generation: Code-generating models output symbolic code that is executed by a separate, deterministic interpreter. llamaCPU is the interpreter. The entire execution trace happens within the neural network, making the process more flexible and learnable.
-
-Getting Started
-Prerequisites
-
-Python 3.10+
-
-PyTorch
-
-Transformers, PEFT, bitsandbytes
-
-An environment with a CUDA-enabled GPU is highly recommended.
-
-Installation
-
-Clone the repository:
-
-Generated bash
-git clone https://github.com/your-username/llamaCPU.git
-cd llamaCPU
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Bash
-IGNORE_WHEN_COPYING_END
-
-Install the required packages:
-
-Generated bash
-pip install -r requirements.txt
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Bash
-IGNORE_WHEN_COPYING_END
-
-(You will need to create a requirements.txt file with packages like torch, transformers, peft, bitsandbytes, accelerate)
-
-Configuration
-
-Key parameters can be adjusted at the top of main.py:
-
-MODEL_ID: The Hugging Face model to use as the CPU.
-
-CHECKPOINT_DIR: Directory to save and load training checkpoints.
-
-config: A dictionary containing hyperparameters like learning rate, loss weights, and SWM dimensions.
-
-Training
-
-To start or resume training, simply run:
-
-Generated bash
-python main.py
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Bash
-IGNORE_WHEN_COPYING_END
-
-The script will automatically find the latest checkpoint and resume from the appropriate stage of the curriculum.
-
-Roadmap & Future Work
-
-Complex Algorithms: Expand the curriculum to include tasks like sorting, searching, and basic string manipulation.
-
-Control Flow: Implement learnable JUMP and IF/THEN instructions to enable loops and conditional logic.
-
-Richer Data Structures: Explicitly train the model to build and traverse linked lists, trees, or graphs within the SWM.
-
-Exploring Different Backbones: Test the architecture with other capable LLMs.
-
-License
-
-This project is licensed under the MIT License. See the LICENSE file for details.
+This project is licensed under the MIT License. See the `LICENSE` file for details.
