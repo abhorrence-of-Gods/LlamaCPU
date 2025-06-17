@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*build/
+*dist/
+*.egg-info/
+venv/
+.env
+
+# Checkpoints (重要！)
+checkpoints_final_adder/
+
+# IDE files
+.vscode/
+.idea/

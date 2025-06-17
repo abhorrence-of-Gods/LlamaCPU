@@ -1,0 +1,1 @@
+# Core deep learning frameworktorch# Hugging Face ecosystem for models, tokenizers, and performance optimizationtransformersacceleratepeftbitsandbytes# Optional: For progress bars in model downloads (highly recommended)tqdm
