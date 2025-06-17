@@ -1,7 +1,6 @@
 # LlamaCPU
 An LLM-driven Neuro-Symbolic Processor
 
-llamaCPU: A Neuro-Symbolic Architecture with a Differentiable LLM-based CPU
 
 ![alt text](https://img.shields.io/badge/build-passing-brightgreen)
 
