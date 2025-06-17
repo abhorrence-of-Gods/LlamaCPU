@@ -8,6 +8,8 @@
 
 The core idea is to teach the LLM to perform complex, multi-step algorithmic tasks by compiling high-level instructions into a low-level program in memory, and then executing it step-by-step.
 
+![Image](https://github.com/user-attachments/assets/7ff44ed7-7546-4bf9-9066-37fdebf409cd)
+
 ## Key Features
 
 - **LLM as a Differentiable CPU**: Leverages the vast pre-trained knowledge and reasoning capabilities of Llama 3 to control the entire computational process.
