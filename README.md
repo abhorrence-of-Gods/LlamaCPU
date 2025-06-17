@@ -35,7 +35,8 @@ The LlamaCPU system consists of three main components:
 3.  **Operator Execution Unit (OEU)**: A small, specialized neural network that acts as a Neural ALU.
     - It takes an operator slot and its argument slots (read from memory via pointers) as input.
     - It performs the actual computation (e.g., addition) and produces a result to be written back to memory.
-![Image](https://github.com/user-attachments/assets/e8d00d40-2b83-4e4f-b50a-2ea2a256db32)
+
+![Image](https://github.com/user-attachments/assets/f0787e0a-c45e-4276-ad5b-9ab586664fb9)
 
 ## Current Status
 
