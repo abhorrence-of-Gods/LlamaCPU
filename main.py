@@ -120,11 +120,14 @@ def train_stage(model, tokenizer, optimizer, scheduler, device, config):
     swm_info = {'content_dim': model.swm.content_dim, 'pointer_dim': model.swm.pointer_dim, 'type_dim': model.swm.type_dim, 'slot_dim': model.swm.slot_dim}
     expert = NeuralCpuExpert()
     expert.set_stage(config['current_stage'])
-    loss_fct_plan = nn.MSELoss().to(device)
+    
+    loss_fct_mse = nn.MSELoss().to(device)
     loss_fct_pc = nn.CrossEntropyLoss().to(device)
+
     model.train()
     recent_losses = deque(maxlen=config['check_interval'])
     target_dtype = torch.bfloat16
+
     def spec_to_tensor(spec, swm, for_loss=False):
         slot = torch.zeros(swm.slot_dim, device=device, dtype=target_dtype)
         slot[0] = spec['type_val']
@@ -147,17 +150,30 @@ def train_stage(model, tokenizer, optimizer, scheduler, device, config):
         prompt_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(device)
         model.swm.reset()
         
-        total_plan_loss = 0
+        total_plan_loss_type = 0
+        total_plan_loss_pointers = 0
+        total_plan_loss_content = 0
         total_pc_loss = 0
         
         # --- PLANフェーズ ---
-        # PLANフェーズは1回の思考なので、KVキャッシュは使わない（ステートレス）
         outputs = model(prompt_ids, past_key_values=None)
         
         for action in plan_phase:
-            target_slot_for_loss = spec_to_tensor(action['slot_spec'], model.swm, for_loss=True).unsqueeze(0)
-            loss = loss_fct_plan(outputs['predicted_slot'], target_slot_for_loss)
-            total_plan_loss += loss
+            target_slot = spec_to_tensor(action['slot_spec'], model.swm, for_loss=True).unsqueeze(0)
+            
+            predicted_parts = model.swm.decode_slot(outputs['predicted_slot'])
+            target_parts = model.swm.decode_slot(target_slot)
+
+            loss_type = loss_fct_mse(predicted_parts['type'], target_parts['type'])
+            total_plan_loss_type += loss_type
+
+            loss_pointers = 0
+            for pred_ptr, target_ptr in zip(predicted_parts['pointers'], target_parts['pointers']):
+                loss_pointers += loss_fct_mse(pred_ptr, target_ptr)
+            total_plan_loss_pointers += loss_pointers / len(predicted_parts['pointers'])
+
+            loss_content = loss_fct_mse(predicted_parts['content'], target_parts['content'])
+            total_plan_loss_content += loss_content
             
             with torch.no_grad():
                 addr_idx_gpu = torch.tensor([action['addr']], device=device, dtype=torch.long)
@@ -167,54 +183,43 @@ def train_stage(model, tokenizer, optimizer, scheduler, device, config):
 
         # --- EXECフェーズ ---
         progress_ratio = min(epoch / config['annealing_epochs'], 1.0)
-        
         with torch.no_grad():
             pc_init_spec = expert._create_slot_spec(pointers=[initial_pc])
             pc_init_slot = spec_to_tensor(pc_init_spec, model.swm).unsqueeze(0)
             model.swm.write_to_address(F.one_hot(torch.tensor([PC_SLOT_ADDR]), num_classes=model.swm.num_slots).to(device, dtype=target_dtype), pc_init_slot)
         
-        # ★★★ 修正: EXECフェーズでKVキャッシュを引き継ぎ、「思考の連続性」を維持する ★★★
-        # 最初の入力はプロンプト全体
         current_exec_input_ids = prompt_ids
         past_key_values_exec = None
-        
         for step in range(len(exec_trace)):
             trace = exec_trace[step]
             expert_pc_addr = torch.tensor([trace['pc_state']], device=device)
-            
-            # KVキャッシュを使い、LLMの内部状態（思考）を引き継ぐ
             outputs = model(current_exec_input_ids, past_key_values=past_key_values_exec)
-            
-            loss = loss_fct_pc(outputs['pc_logits'], expert_pc_addr)
-            total_pc_loss += loss
-
-            # 次のステップのためにKVキャッシュと入力を更新
+            total_pc_loss += loss_fct_pc(outputs['pc_logits'], expert_pc_addr)
             past_key_values_exec = outputs['past_key_values']
-            # 次の入力は、KVキャッシュを更新するためのダミートークン。ここでは便宜的に最後のトークンを再利用。
-            current_exec_input_ids = prompt_ids[:, -1:] # Note: Use prompt_ids to avoid using model's own output as input here
-
+            current_exec_input_ids = prompt_ids[:, -1:]
             use_self_regression = random.random() < progress_ratio
             pc_probs = F.softmax(outputs['pc_logits'], dim=-1) if use_self_regression else F.one_hot(expert_pc_addr, num_classes=model.swm.num_slots).to(dtype=target_dtype)
-            
-            with torch.no_grad():
-                model.execute_step(pc_probs)
+            with torch.no_grad(): model.execute_step(pc_probs)
         
-        weighted_loss = (config['plan_loss_weight'] * total_plan_loss) + \
-                        (config['pc_loss_weight'] * total_pc_loss)
+        weighted_plan_loss = (config['plan_loss_weight_type'] * total_plan_loss_type) + \
+                             (config['plan_loss_weight_pointers'] * total_plan_loss_pointers) + \
+                             (config['plan_loss_weight_content'] * total_plan_loss_content)
+        
+        weighted_loss = weighted_plan_loss + (config['pc_loss_weight'] * total_pc_loss)
         weighted_loss.backward()
         
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        
         optimizer.step()
         scheduler.step()
 
-        unweighted_total_loss = total_plan_loss.item() + total_pc_loss.item()
+        unweighted_plan_loss = total_plan_loss_type.item() + total_plan_loss_pointers.item() + total_plan_loss_content.item()
+        unweighted_total_loss = unweighted_plan_loss + total_pc_loss.item()
         recent_losses.append(unweighted_total_loss)
 
         if epoch % config['log_interval'] == 0:
             avg_loss = sum(recent_losses) / len(recent_losses) if recent_losses else 0
             print(f"  Stage {expert.stage} | Epoch {epoch}/{config['max_epochs_per_stage']} | Avg Loss: {avg_loss:.4f} "
-                  f"[Plan: {total_plan_loss.item():.4f}, PC: {total_pc_loss.item():.4f}] | SR Ratio: {progress_ratio:.2f}")
+                  f"[Plan(T/P/C): {total_plan_loss_type.item():.4f}/{total_plan_loss_pointers.item():.4f}/{total_plan_loss_content.item():.4f}, PC: {total_pc_loss.item():.4f}] | SR Ratio: {progress_ratio:.2f}")
 
         if epoch % config['check_interval'] == 0 and recent_losses:
             if sum(recent_losses) / len(recent_losses) < config['loss_threshold']:
@@ -239,7 +244,10 @@ def main():
         'swm_slots': 256, 'swm_slot_dim': 512, 'swm_ptr_dim': 64, 'swm_num_ptr': 4,
         'max_digits': 20,
         'content_norm_factor': 10.0,
-        'plan_loss_weight': 25.0,
+        
+        'plan_loss_weight_type': 1.0,
+        'plan_loss_weight_pointers': 10.0,
+        'plan_loss_weight_content': 5.0,
         'pc_loss_weight': 1.0,
     }
 
