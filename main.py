@@ -147,7 +147,7 @@ def train_stage(model, tokenizer, optimizer, scheduler, device, config):
         optimizer.zero_grad()
         prompt_str, plan_phase, exec_trace, initial_pc = expert.compile(swm_info)
         messages = [{"role": "user", "content": prompt_str}]
-        prompt_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(device)
+        base_prompt_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(device)
         model.swm.reset()
         
         total_plan_loss_type = 0
@@ -155,26 +155,34 @@ def train_stage(model, tokenizer, optimizer, scheduler, device, config):
         total_plan_loss_content = 0
         total_pc_loss = 0
         
+        # ★★★ 修正: PLANフェーズを逐次的なプロセスに再構築 ★★★
         # --- PLANフェーズ ---
-        outputs = model(prompt_ids, past_key_values=None)
+        current_plan_input_ids = base_prompt_ids
+        past_key_values_plan = None
         
         for action in plan_phase:
+            # 各計画ステップでモデルを呼び出し、思考の文脈(KVキャッシュ)を引き継ぐ
+            outputs = model(current_plan_input_ids, past_key_values=past_key_values_plan)
+
+            # このステップの損失を計算
             target_slot = spec_to_tensor(action['slot_spec'], model.swm, for_loss=True).unsqueeze(0)
-            
             predicted_parts = model.swm.decode_slot(outputs['predicted_slot'])
             target_parts = model.swm.decode_slot(target_slot)
 
-            loss_type = loss_fct_mse(predicted_parts['type'], target_parts['type'])
-            total_plan_loss_type += loss_type
-
+            total_plan_loss_type += loss_fct_mse(predicted_parts['type'], target_parts['type'])
+            
             loss_pointers = 0
             for pred_ptr, target_ptr in zip(predicted_parts['pointers'], target_parts['pointers']):
                 loss_pointers += loss_fct_mse(pred_ptr, target_ptr)
             total_plan_loss_pointers += loss_pointers / len(predicted_parts['pointers'])
 
-            loss_content = loss_fct_mse(predicted_parts['content'], target_parts['content'])
-            total_plan_loss_content += loss_content
+            total_plan_loss_content += loss_fct_mse(predicted_parts['content'], target_parts['content'])
             
+            # 次のステップの準備
+            past_key_values_plan = outputs['past_key_values']
+            current_plan_input_ids = base_prompt_ids[:, -1:] # ダミートークンでKVキャッシュを更新
+
+            # SWMにはExpertの正解を書き込む（教師強制）
             with torch.no_grad():
                 addr_idx_gpu = torch.tensor([action['addr']], device=device, dtype=torch.long)
                 addr_prob = F.one_hot(addr_idx_gpu, num_classes=model.swm.num_slots).to(dtype=target_dtype)
@@ -188,7 +196,7 @@ def train_stage(model, tokenizer, optimizer, scheduler, device, config):
             pc_init_slot = spec_to_tensor(pc_init_spec, model.swm).unsqueeze(0)
             model.swm.write_to_address(F.one_hot(torch.tensor([PC_SLOT_ADDR]), num_classes=model.swm.num_slots).to(device, dtype=target_dtype), pc_init_slot)
         
-        current_exec_input_ids = prompt_ids
+        current_exec_input_ids = base_prompt_ids
         past_key_values_exec = None
         for step in range(len(exec_trace)):
             trace = exec_trace[step]
@@ -196,7 +204,7 @@ def train_stage(model, tokenizer, optimizer, scheduler, device, config):
             outputs = model(current_exec_input_ids, past_key_values=past_key_values_exec)
             total_pc_loss += loss_fct_pc(outputs['pc_logits'], expert_pc_addr)
             past_key_values_exec = outputs['past_key_values']
-            current_exec_input_ids = prompt_ids[:, -1:]
+            current_exec_input_ids = base_prompt_ids[:, -1:]
             use_self_regression = random.random() < progress_ratio
             pc_probs = F.softmax(outputs['pc_logits'], dim=-1) if use_self_regression else F.one_hot(expert_pc_addr, num_classes=model.swm.num_slots).to(dtype=target_dtype)
             with torch.no_grad(): model.execute_step(pc_probs)
