@@ -36,11 +36,24 @@ class Llama3_NSW_OEU(nn.Module):
         self.d_model = config.hidden_size
         self.llama = base_model
         
-        # ★★★ 修正: lm_headの取得ロジックを完全に削除します。
-        # forwardメソッドでモデル出力から直接logitsを取得するため、この属性は不要です。
+        # ★★★ 修正: 単一のsynthesizerを廃止し、専門のサブヘッドを定義 ★★★
         
-        self.slot_synthesizer = nn.Sequential(
-            nn.Linear(self.d_model, swm.slot_dim),
+        # 1. Typeヘッド: 0か1を出力するのに適したSigmoidを使用
+        self.type_head = nn.Sequential(
+            nn.Linear(self.d_model, self.swm.type_dim),
+            nn.Sigmoid()
+        )
+        
+        # 2. Pointersヘッド: 正規化ベクトルに適したTanhを使用
+        pointers_total_dim = self.swm.num_pointers * self.swm.pointer_dim
+        self.pointers_head = nn.Sequential(
+            nn.Linear(self.d_model, pointers_total_dim),
+            nn.Tanh()
+        )
+        
+        # 3. Contentヘッド: 正規化数値に適したTanhを使用
+        self.content_head = nn.Sequential(
+            nn.Linear(self.d_model, self.swm.content_dim),
             nn.Tanh()
         )
         
@@ -48,7 +61,6 @@ class Llama3_NSW_OEU(nn.Module):
         self.oeu = OperatorExecutionUnit(swm.slot_dim, self.d_model)
 
     def forward(self, input_ids, past_key_values=None, attention_mask=None):
-        # LLMのforwardパスを実行
         gpt_outputs = self.llama(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -57,17 +69,21 @@ class Llama3_NSW_OEU(nn.Module):
             output_hidden_states=True
         )
         
-        # ★★★ 修正: gpt_outputsから直接logitsを取得します。
-        # これにより、PEFT化されているかどうかにかかわらず、常に正しいロジットが得られ、
-        # 非効率な再計算や属性エラーを回避できます。
         token_logits = gpt_outputs.logits
-        
-        # 最後の隠れ層の状態を取得（これは他のヘッドで利用するため必要）
         last_hidden_state = gpt_outputs.hidden_states[-1]
         h_t = last_hidden_state[:, -1, :].contiguous()
 
-        # 他のカスタムヘッドの計算
-        predicted_slot_vec = self.slot_synthesizer(h_t)
+        # ★★★ 修正: 各ヘッドから出力を生成し、結合して最終的なスロットベクトルを構築 ★★★
+        predicted_type = self.type_head(h_t)
+        predicted_pointers = self.pointers_head(h_t)
+        predicted_content = self.content_head(h_t)
+        
+        predicted_slot_vec = torch.cat([
+            predicted_type,
+            predicted_pointers,
+            predicted_content
+        ], dim=1)
+
         pc_logits = self.pc_controller(h_t)
 
         return {
@@ -78,7 +94,6 @@ class Llama3_NSW_OEU(nn.Module):
         }
         
     def execute_step(self, pc_address_probs):
-        # (このメソッドは変更なし)
         current_pc_addr = torch.argmax(pc_address_probs, dim=-1).item()
 
         operator_slot = torch.bmm(pc_address_probs.unsqueeze(1), self.swm.memory).squeeze(1)
