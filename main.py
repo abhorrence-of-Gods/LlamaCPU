@@ -151,9 +151,8 @@ def train_stage(model, tokenizer, optimizer, scheduler, device, config):
         total_pc_loss = 0
         
         # --- PLANフェーズ ---
-        current_input_ids = prompt_ids
-        outputs = model(current_input_ids)
-        past_key_values = outputs['past_key_values']
+        # PLANフェーズは1回の思考なので、KVキャッシュは使わない（ステートレス）
+        outputs = model(prompt_ids, past_key_values=None)
         
         for action in plan_phase:
             target_slot_for_loss = spec_to_tensor(action['slot_spec'], model.swm, for_loss=True).unsqueeze(0)
@@ -174,16 +173,26 @@ def train_stage(model, tokenizer, optimizer, scheduler, device, config):
             pc_init_slot = spec_to_tensor(pc_init_spec, model.swm).unsqueeze(0)
             model.swm.write_to_address(F.one_hot(torch.tensor([PC_SLOT_ADDR]), num_classes=model.swm.num_slots).to(device, dtype=target_dtype), pc_init_slot)
         
-        past_key_values_exec = None 
+        # ★★★ 修正: EXECフェーズでKVキャッシュを引き継ぎ、「思考の連続性」を維持する ★★★
+        # 最初の入力はプロンプト全体
+        current_exec_input_ids = prompt_ids
+        past_key_values_exec = None
+        
         for step in range(len(exec_trace)):
             trace = exec_trace[step]
             expert_pc_addr = torch.tensor([trace['pc_state']], device=device)
             
-            outputs = model(prompt_ids, past_key_values_exec)
+            # KVキャッシュを使い、LLMの内部状態（思考）を引き継ぐ
+            outputs = model(current_exec_input_ids, past_key_values=past_key_values_exec)
             
             loss = loss_fct_pc(outputs['pc_logits'], expert_pc_addr)
             total_pc_loss += loss
-            
+
+            # 次のステップのためにKVキャッシュと入力を更新
+            past_key_values_exec = outputs['past_key_values']
+            # 次の入力は、KVキャッシュを更新するためのダミートークン。ここでは便宜的に最後のトークンを再利用。
+            current_exec_input_ids = prompt_ids[:, -1:] # Note: Use prompt_ids to avoid using model's own output as input here
+
             use_self_regression = random.random() < progress_ratio
             pc_probs = F.softmax(outputs['pc_logits'], dim=-1) if use_self_regression else F.one_hot(expert_pc_addr, num_classes=model.swm.num_slots).to(dtype=target_dtype)
             
@@ -194,7 +203,6 @@ def train_stage(model, tokenizer, optimizer, scheduler, device, config):
                         (config['pc_loss_weight'] * total_pc_loss)
         weighted_loss.backward()
         
-        # ★★★ 勾配クリッピングを追加 ★★★
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         
         optimizer.step()
@@ -227,11 +235,11 @@ def main():
     config = {
         'lr': 2e-5, 'max_epochs_per_stage': 10000, 'log_interval': 100,
         'check_interval': 1000, 'loss_threshold': 0.05,
-        'annealing_epochs': 10000,
+        'annealing_epochs': 20000,
         'swm_slots': 256, 'swm_slot_dim': 512, 'swm_ptr_dim': 64, 'swm_num_ptr': 4,
         'max_digits': 20,
         'content_norm_factor': 10.0,
-        'plan_loss_weight': 10.0,
+        'plan_loss_weight': 25.0,
         'pc_loss_weight': 1.0,
     }
 
